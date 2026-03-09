@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
+// Vercelデプロイ時のタイムアウト対策 (Hobbyプランの最大値である60秒に設定)
+// これ以上の時間をかける場合は Pro プランである必要があります。
+export const maxDuration = 60;
 
 const TRANSCRIPTION_PROMPT_SYSTEM = `
 # Role
@@ -90,7 +91,7 @@ async function fileToGenerativePart(file: Blob, mimeType: string) {
     };
 }
 
-async function tryGenerate(modelName: string, prompt: string, filePart?: any) {
+async function tryGenerate(genAI: GoogleGenerativeAI, modelName: string, prompt: string, filePart?: any) {
     try {
         const model = genAI.getGenerativeModel({ model: modelName });
         const content = filePart ? [prompt, filePart] : [prompt];
@@ -102,9 +103,23 @@ async function tryGenerate(modelName: string, prompt: string, filePart?: any) {
 }
 
 export async function POST(req: NextRequest) {
-    if (!process.env.GOOGLE_API_KEY) {
-        return NextResponse.json({ error: "GOOGLE_API_KEY is not set" }, { status: 500 });
+    let apiKey = process.env.GOOGLE_API_KEY;
+
+    // ヘッダーからカスタムAPIキーを取得
+    const authHeader = req.headers.get('authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const customKey = authHeader.split(' ')[1];
+        if (customKey && customKey.trim() !== '') {
+            apiKey = customKey;
+        }
     }
+
+    if (!apiKey) {
+        return NextResponse.json({ error: "APIキーが提供されていません。画面から入力するか、環境変数を設定してください。" }, { status: 401 });
+    }
+
+    // Initialize Gemini with the selected key
+    const genAI = new GoogleGenerativeAI(apiKey);
 
     try {
         const formData = await req.formData();
@@ -115,39 +130,33 @@ export async function POST(req: NextRequest) {
         }
 
         // Step 1: Transcription
-        // Strategy: Gemini 3 Flash Preview -> Gemini 2.5 Flash -> Gemini 2.0 Flash
+        // Strategy: Highest capability down to stable fallback (Free tier available models only)
+        // Models from image list with available TPM/RPM: Gemini 3 Flash -> Gemini 2.5 Flash -> Gemini 3.1 Flash Lite -> Gemini 2.5 Flash Lite
+        const modelFallbackSequence = [
+            "gemini-3.0-flash",
+            "gemini-2.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash-lite"
+        ];
+
         const filePart = await fileToGenerativePart(file, file.type);
         let transcript = "";
+        let usedModel = "";
 
-        // Primary: Gemini 3 Flash (As requested)
-        let usedModel = "gemini-3-flash-preview";
-
-        try {
-            console.log(`Attempting transcription with ${usedModel}...`);
-            transcript = await tryGenerate("gemini-3-flash-preview", TRANSCRIPTION_PROMPT_SYSTEM, filePart);
-        } catch (e: any) {
-            console.warn(`${usedModel} failed (Attempt 1). Error: ${e.message}`);
-
-            // Retry Strategy: Downgrade to 2.5 Flash
-            usedModel = "gemini-2.5-flash";
-            console.warn(`Falling back to ${usedModel}...`);
-
+        for (const modelName of modelFallbackSequence) {
             try {
-                transcript = await tryGenerate("gemini-2.5-flash", TRANSCRIPTION_PROMPT_SYSTEM, filePart);
-            } catch (e2: any) {
-                console.warn(`${usedModel} failed. Error: ${e2.message}`);
-
-                // Final Fallback: Gemini 2.0 Flash (Stable)
-                usedModel = "gemini-2.0-flash";
-                console.warn(`Falling back to ${usedModel}...`);
-
-                try {
-                    transcript = await tryGenerate("gemini-2.0-flash", TRANSCRIPTION_PROMPT_SYSTEM, filePart);
-                } catch (e3: any) {
-                    console.warn(`All models failed. Last error: ${e3.message}`);
-                    throw new Error(`All transcription models failed. Please try again later. (${e3.message})`);
-                }
+                console.log(`Attempting transcription with ${modelName}...`);
+                transcript = await tryGenerate(genAI, modelName, TRANSCRIPTION_PROMPT_SYSTEM, filePart);
+                usedModel = modelName;
+                break; // Success, exit the loop
+            } catch (e: any) {
+                console.warn(`${modelName} failed. Error: ${e.message}`);
+                // Continue to the next model in the sequence
             }
+        }
+
+        if (!transcript) {
+            throw new Error(`All transcription models failed. Please try again later.`);
         }
 
         // Step 2: Minutes
@@ -156,17 +165,26 @@ export async function POST(req: NextRequest) {
         const minutesPrompt = `${MINUTES_PROMPT_SYSTEM}\n\n---\n\nTRANSCRIPT:\n${transcript}`;
 
         try {
-            minutes = await tryGenerate(usedModel, minutesPrompt);
+            minutes = await tryGenerate(genAI, usedModel, minutesPrompt);
         } catch (e: any) {
             console.warn(`Minutes generation failed with ${usedModel}. Error: ${e.message}`);
 
-            // One last try with the most stable model if we aren't already on it
-            if (usedModel !== "gemini-2.0-flash") {
-                console.warn("Falling back to gemini-2.0-flash for minutes");
-                minutes = await tryGenerate("gemini-2.0-flash", minutesPrompt);
-                usedModel += " (2.0 Flash fallback)";
-            } else {
-                throw e;
+            // Try fallback models for minutes if the preferred one failed
+            let minutesSuccess = false;
+            for (const fallbackModel of modelFallbackSequence) {
+                if (fallbackModel === usedModel) continue; // Already tried
+                try {
+                    console.warn(`Falling back to ${fallbackModel} for minutes...`);
+                    minutes = await tryGenerate(genAI, fallbackModel, minutesPrompt);
+                    usedModel += ` (${fallbackModel} fallback)`;
+                    minutesSuccess = true;
+                    break;
+                } catch (fallbackErr: any) {
+                    console.warn(`${fallbackModel} minutes fallback failed. Error: ${fallbackErr.message}`);
+                }
+            }
+            if (!minutesSuccess) {
+                throw new Error(`Failed to generate minutes with all fallback models.`);
             }
         }
 

@@ -12,8 +12,15 @@ export default function Home() {
   const [minutes, setMinutes] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [usedModel, setUsedModel] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState<string>("");
 
   const handleFileSelect = async (file: File) => {
+    if (!apiKey.trim()) {
+      setError("Please enter your Gemini API Key first.");
+      setStatus("error");
+      return;
+    }
+
     setStatus("transcribing");
     setError(null);
     setTranscript("");
@@ -25,6 +32,9 @@ export default function Home() {
     try {
       const response = await fetch("/api/transcribe", {
         method: "POST",
+        headers: {
+          'Authorization': `Bearer ${apiKey.trim()}`
+        },
         body: formData,
       });
 
@@ -67,7 +77,28 @@ export default function Home() {
         </header>
 
         {status === "uploading" || status === "error" ? (
-          <FileUploader onFileSelect={handleFileSelect} disabled={status === "error"} />
+          <div className="max-w-2xl mx-auto space-y-6">
+            <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm relative z-10">
+              <label htmlFor="apiKey" className="block text-sm font-medium text-slate-700 mb-2">
+                Gemini API Key
+              </label>
+              <input
+                id="apiKey"
+                type="password"
+                placeholder="AIzaSy..."
+                value={apiKey}
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  if (error === "Please enter your Gemini API Key first.") setError(null);
+                }}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all placeholder-slate-400 bg-slate-50 focus:bg-white"
+              />
+              <p className="text-xs text-slate-500 mt-2">
+                Your API key is only used for this session and is not stored permanently.
+              </p>
+            </div>
+            <FileUploader onFileSelect={handleFileSelect} disabled={status === "error" && error !== "Please enter your Gemini API Key first."} />
+          </div>
         ) : null}
 
         {status !== "uploading" && (
