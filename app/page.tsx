@@ -18,6 +18,10 @@ type ErrorResponse = {
   error?: string;
 };
 
+function isErrorResponse(data: TranscribeSuccessResponse | ErrorResponse): data is ErrorResponse {
+  return "error" in data;
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
@@ -61,7 +65,7 @@ export default function Home() {
       const data = (await response.json()) as TranscribeSuccessResponse | ErrorResponse;
 
       if (!response.ok) {
-        throw new Error(data.error || "Failed to process file");
+        throw new Error(isErrorResponse(data) ? data.error || "Failed to process file" : "Failed to process file");
       }
 
       // Since our API currently does both in one sequence server-side, 
