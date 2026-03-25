@@ -1,5 +1,3 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
 async function main() {
     const apiKey = process.env.GOOGLE_API_KEY;
     if (!apiKey) {

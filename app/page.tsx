@@ -6,6 +6,26 @@ import { ProcessingStatus, type Step } from "@/components/ProcessingStatus";
 import { ResultViewer } from "@/components/ResultViewer";
 import { AlertCircle } from "lucide-react";
 
+type TranscribeSuccessResponse = {
+  transcript: string;
+  minutes: string;
+  meta: {
+    modelUsed: string;
+  };
+};
+
+type ErrorResponse = {
+  error?: string;
+};
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Something went wrong";
+}
+
 export default function Home() {
   const [status, setStatus] = useState<Step>("uploading"); // utilizing 'uploading' state as initial idle state too
   const [transcript, setTranscript] = useState<string>("");
@@ -33,16 +53,16 @@ export default function Home() {
       const response = await fetch("/api/transcribe", {
         method: "POST",
         headers: {
-          'Authorization': `Bearer ${apiKey.trim()}`
+          Authorization: `Bearer ${apiKey.trim()}`
         },
         body: formData,
       });
 
-      if (!response.ok) {
-        throw new Error("Failed to process file");
-      }
+      const data = (await response.json()) as TranscribeSuccessResponse | ErrorResponse;
 
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to process file");
+      }
 
       // Since our API currently does both in one sequence server-side, 
       // we simulate the step change for UX or receive partials if we streamed (future improvement).
@@ -52,14 +72,18 @@ export default function Home() {
       // Artificial delay to let user see the state change (optional, just for UX feel)
       await new Promise(r => setTimeout(r, 800));
 
+      if (!("transcript" in data) || !("minutes" in data) || !("meta" in data)) {
+        throw new Error("Unexpected API response");
+      }
+
       setTranscript(data.transcript);
       setMinutes(data.minutes);
       setUsedModel(data.meta.modelUsed);
       setStatus("completed");
 
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Something went wrong");
+    } catch (error: unknown) {
+      console.error(error);
+      setError(getErrorMessage(error));
       setStatus("error");
     }
   };
@@ -72,7 +96,7 @@ export default function Home() {
             Smart <span className="text-blue-600">Minutes</span>
           </h1>
           <p className="text-lg text-slate-500 max-w-2xl mx-auto">
-            Upload your meeting audio. We'll Transcribe it and generate detailed, structured minutes using advanced AI.
+            Upload your meeting audio. We&apos;ll transcribe it and generate detailed, structured minutes using advanced AI.
           </p>
         </header>
 

@@ -1,6 +1,5 @@
 import React from "react";
 import { FileText, Copy, Download } from "lucide-react";
-import { cn } from "@/utils/cn";
 
 interface ResultViewerProps {
     title: string;

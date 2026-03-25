@@ -5,6 +5,21 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 // これ以上の時間をかける場合は Pro プランである必要があります。
 export const maxDuration = 60;
 
+type GenerativePart = {
+    inlineData: {
+        data: string;
+        mimeType: string;
+    };
+};
+
+const DEFAULT_MODEL_FALLBACK_SEQUENCE = [
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+] as const;
+
 const TRANSCRIPTION_PROMPT_SYSTEM = `
 # Role
 あなたはプロの文字起こしスペシャリストです。提供された音声ファイルを聞き、忠実かつ正確な日本語の書き起こし原稿を作成することがあなたの任務です。
@@ -91,15 +106,39 @@ async function fileToGenerativePart(file: Blob, mimeType: string) {
     };
 }
 
-async function tryGenerate(genAI: GoogleGenerativeAI, modelName: string, prompt: string, filePart?: any) {
-    try {
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const content = filePart ? [prompt, filePart] : [prompt];
-        const result = await model.generateContent(content);
-        return result.response.text();
-    } catch (error) {
-        throw error;
+function getErrorMessage(error: unknown) {
+    if (error instanceof Error) {
+        return error.message;
     }
+
+    return String(error);
+}
+
+function getModelFallbackSequence() {
+    const rawSequence = process.env.GEMINI_MODEL_SEQUENCE?.trim();
+
+    if (!rawSequence) {
+        return [...DEFAULT_MODEL_FALLBACK_SEQUENCE];
+    }
+
+    const models = rawSequence
+        .split(",")
+        .map((model) => model.trim())
+        .filter(Boolean);
+
+    return models.length > 0 ? models : [...DEFAULT_MODEL_FALLBACK_SEQUENCE];
+}
+
+async function tryGenerate(
+    genAI: GoogleGenerativeAI,
+    modelName: string,
+    prompt: string,
+    filePart?: GenerativePart,
+) {
+    const model = genAI.getGenerativeModel({ model: modelName });
+    const content = filePart ? [prompt, filePart] : [prompt];
+    const result = await model.generateContent(content);
+    return result.response.text();
 }
 
 export async function POST(req: NextRequest) {
@@ -129,19 +168,13 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "No file provided" }, { status: 400 });
         }
 
-        // Step 1: Transcription
-        // Strategy: Highest capability down to stable fallback (Free tier available models only)
-        // Models from image list with available TPM/RPM: Gemini 3 Flash -> Gemini 2.5 Flash -> Gemini 3.1 Flash Lite -> Gemini 2.5 Flash Lite
-        const modelFallbackSequence = [
-            "gemini-3.0-flash",
-            "gemini-2.5-flash",
-            "gemini-3.1-flash-lite",
-            "gemini-2.5-flash-lite"
-        ];
+        // Stable documented fallbacks first. Override with GEMINI_MODEL_SEQUENCE if needed.
+        const modelFallbackSequence = getModelFallbackSequence();
 
         const filePart = await fileToGenerativePart(file, file.type);
         let transcript = "";
         let usedModel = "";
+        const transcriptionErrors: string[] = [];
 
         for (const modelName of modelFallbackSequence) {
             try {
@@ -149,14 +182,18 @@ export async function POST(req: NextRequest) {
                 transcript = await tryGenerate(genAI, modelName, TRANSCRIPTION_PROMPT_SYSTEM, filePart);
                 usedModel = modelName;
                 break; // Success, exit the loop
-            } catch (e: any) {
-                console.warn(`${modelName} failed. Error: ${e.message}`);
+            } catch (error: unknown) {
+                const message = getErrorMessage(error);
+                transcriptionErrors.push(`${modelName}: ${message}`);
+                console.warn(`${modelName} failed. Error: ${message}`);
                 // Continue to the next model in the sequence
             }
         }
 
         if (!transcript) {
-            throw new Error(`All transcription models failed. Please try again later.`);
+            throw new Error(
+                `All transcription models failed. ${transcriptionErrors.join(" | ") || "Please try again later."}`,
+            );
         }
 
         // Step 2: Minutes
@@ -166,11 +203,14 @@ export async function POST(req: NextRequest) {
 
         try {
             minutes = await tryGenerate(genAI, usedModel, minutesPrompt);
-        } catch (e: any) {
-            console.warn(`Minutes generation failed with ${usedModel}. Error: ${e.message}`);
+        } catch (error: unknown) {
+            const primaryMinutesError = getErrorMessage(error);
+            console.warn(`Minutes generation failed with ${usedModel}. Error: ${primaryMinutesError}`);
 
             // Try fallback models for minutes if the preferred one failed
             let minutesSuccess = false;
+            const minutesErrors = [`${usedModel}: ${primaryMinutesError}`];
+
             for (const fallbackModel of modelFallbackSequence) {
                 if (fallbackModel === usedModel) continue; // Already tried
                 try {
@@ -179,12 +219,14 @@ export async function POST(req: NextRequest) {
                     usedModel += ` (${fallbackModel} fallback)`;
                     minutesSuccess = true;
                     break;
-                } catch (fallbackErr: any) {
-                    console.warn(`${fallbackModel} minutes fallback failed. Error: ${fallbackErr.message}`);
+                } catch (fallbackError: unknown) {
+                    const message = getErrorMessage(fallbackError);
+                    minutesErrors.push(`${fallbackModel}: ${message}`);
+                    console.warn(`${fallbackModel} minutes fallback failed. Error: ${message}`);
                 }
             }
             if (!minutesSuccess) {
-                throw new Error(`Failed to generate minutes with all fallback models.`);
+                throw new Error(`Failed to generate minutes with all fallback models. ${minutesErrors.join(" | ")}`);
             }
         }
 
@@ -196,10 +238,10 @@ export async function POST(req: NextRequest) {
             }
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Processing error:", error);
         return NextResponse.json(
-            { error: error.message || "An error occurred during processing" },
+            { error: getErrorMessage(error) || "An error occurred during processing" },
             { status: 500 }
         );
     }
