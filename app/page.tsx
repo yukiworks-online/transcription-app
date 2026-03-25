@@ -18,8 +18,22 @@ type ErrorResponse = {
   error?: string;
 };
 
+type TranscribeApiResponse = TranscribeSuccessResponse | ErrorResponse | string;
+
 function isErrorResponse(data: TranscribeSuccessResponse | ErrorResponse): data is ErrorResponse {
   return "error" in data;
+}
+
+function getApiErrorMessage(data: TranscribeApiResponse) {
+  if (typeof data === "string") {
+    return data;
+  }
+
+  if (isErrorResponse(data)) {
+    return data.error || "Failed to process file";
+  }
+
+  return "Failed to process file";
 }
 
 function getErrorMessage(error: unknown) {
@@ -62,10 +76,17 @@ export default function Home() {
         body: formData,
       });
 
-      const data = (await response.json()) as TranscribeSuccessResponse | ErrorResponse;
+      const rawText = await response.text();
+      let data: TranscribeApiResponse = rawText;
+
+      try {
+        data = rawText ? JSON.parse(rawText) as TranscribeSuccessResponse | ErrorResponse : "";
+      } catch {
+        data = rawText;
+      }
 
       if (!response.ok) {
-        throw new Error(isErrorResponse(data) ? data.error || "Failed to process file" : "Failed to process file");
+        throw new Error(getApiErrorMessage(data));
       }
 
       // Since our API currently does both in one sequence server-side, 
@@ -76,7 +97,13 @@ export default function Home() {
       // Artificial delay to let user see the state change (optional, just for UX feel)
       await new Promise(r => setTimeout(r, 800));
 
-      if (!("transcript" in data) || !("minutes" in data) || !("meta" in data)) {
+      if (
+        typeof data !== "object" ||
+        data === null ||
+        !("transcript" in data) ||
+        !("minutes" in data) ||
+        !("meta" in data)
+      ) {
         throw new Error("Unexpected API response");
       }
 
